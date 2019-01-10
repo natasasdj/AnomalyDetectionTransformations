@@ -1,5 +1,6 @@
 import os
 import csv
+import faiss
 from collections import defaultdict
 from glob import glob
 from datetime import datetime
@@ -124,6 +125,92 @@ def _transformations_experiment(dataset_load_fn, dataset_name, single_class_ind,
     mdl.save_weights(mdl_weights_path)
 
     gpu_q.put(gpu_to_use)
+
+def _transformations_nnd_experiment(dataset_load_fn, dataset_name, single_class_ind, gpu_q):
+    gpu_to_use = gpu_q.get()
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu_to_use
+
+    (x_train, y_train), (x_test, y_test) = dataset_load_fn()
+
+    if dataset_name in ['cats-vs-dogs']:
+        transformer = Transformer(16, 16)
+        n, k = (16, 8)
+    else:
+        transformer = Transformer(8, 8)
+        n, k = (10, 4)
+    mdl = create_wide_residual_network(x_train.shape[1:], transformer.n_transforms, n, k)
+    mdl.compile('adam',
+                'categorical_crossentropy',
+                ['acc'])
+
+    x_train_task = x_train[y_train.flatten() == single_class_ind]
+    transformations_inds = np.tile(np.arange(transformer.n_transforms), len(x_train_task))
+    x_train_task_transformed = transformer.transform_batch(np.repeat(x_train_task, transformer.n_transforms, axis=0),
+                                                           transformations_inds)
+
+    batch_size = 128
+
+    mdl.fit(x=x_train_task_transformed, y=to_categorical(transformations_inds),
+            batch_size=batch_size, epochs=int(np.ceil(200/transformer.n_transforms))
+            )
+
+    #################################################################################################
+    # simplified normality score
+    #################################################################################################
+    # preds = np.zeros((len(x_test), transformer.n_transforms))
+    # for t in range(transformer.n_transforms):
+    #     preds[:, t] = mdl.predict(transformer.transform_batch(x_test, [t] * len(x_test)),
+    #                               batch_size=batch_size)[:, t]
+    #
+    # labels = y_test.flatten() == single_class_ind
+    # scores = preds.mean(axis=-1)
+    #################################################################################################
+
+
+    ### features model
+    f = mdl.layers[32].output
+    feature_model = Model(inputs=mdl.input, outputs=f)    
+    
+    features_train = feature_model.predict(x_train_task)
+    start = time.time()
+    features_test = feature_model.predict(x_test)
+    end = time.time()
+    time1 = end - start
+    
+    ### faiss NND ###
+   
+    # quantized L2 distance
+    m = 32; c = 64; k = 1; nlist = 1
+    d = features_train.shape[1]
+    quantizer = faiss.IndexFlatL2(d)  
+    index = faiss.IndexIVFPQ(quantizer, d, nlist, m, c)
+    index.train(features_train)
+    index.make_direct_map()
+    index.add(features_train)
+    start = time.time()
+    Dq, Iq = index.search(features_test, k)
+    end = time.time()
+    time2 = end - start
+    
+    scores = Dq[:,0])
+    labels = y_test.flatten() <> cls_no
+
+    res_file_name = '{}_transformations_{}_{}.npz'.format(dataset_name,
+                                                 get_class_name_from_index(single_class_ind, dataset_name),
+                                                 datetime.now().strftime('%Y-%m-%d-%H%M'))
+
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    save_roc_pr_curve_data(scores, labels, res_file_path)
+
+    mdl_weights_name = '{}_transformations_{}_{}_weights.h5'.format(dataset_name,
+                                                           get_class_name_from_index(single_class_ind, dataset_name),
+                                                           datetime.now().strftime('%Y-%m-%d-%H%M'))
+    mdl_weights_path = os.path.join(RESULTS_DIR, dataset_name, mdl_weights_name)
+    mdl.save_weights(mdl_weights_path)
+
+    gpu_q.put(gpu_to_use)
+
+
 
 
 def _train_ocsvm_and_score(params, xtrain, test_labels, xtest):
@@ -348,6 +435,21 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes):
         _raw_ocsvm_experiment(load_dataset_fn, dataset_name, c)
 
     n_runs = 5
+
+    # Transformations plus NND
+    for _ in range(n_runs):
+        processes = [Process(target=_transformations_nnd_experiment,
+                             args=(load_dataset_fn, dataset_name, c, q)) for c in range(n_classes)]
+        if dataset_name in ['cats-vs-dogs']:  # Self-labeled set is memory consuming
+            for p in processes:
+                p.start()
+                p.join()
+        else:
+            for p in processes:
+                p.start()
+            for p in processes:
+                p.join()
+
 
     # Transformations
     for _ in range(n_runs):
