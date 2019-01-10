@@ -1,6 +1,7 @@
 import os
 import csv
 import faiss
+import time
 from collections import defaultdict
 from glob import glob
 from datetime import datetime
@@ -43,7 +44,7 @@ def _transformations_experiment(dataset_load_fn, dataset_name, single_class_ind,
                 'categorical_crossentropy',
                 ['acc'])
 
-    x_train_task = x_train[y_train.flatten() == single_class_ind]
+    x_train_task = x_train[y_train.flatten() == single_class_ind][0:10]
     transformations_inds = np.tile(np.arange(transformer.n_transforms), len(x_train_task))
     x_train_task_transformed = transformer.transform_batch(np.repeat(x_train_task, transformer.n_transforms, axis=0),
                                                            transformations_inds)
@@ -180,7 +181,7 @@ def _transformations_nnd_experiment(dataset_load_fn, dataset_name, single_class_
     ### faiss NND ###
    
     # quantized L2 distance
-    m = 32; c = 64; k = 1; nlist = 1
+    m = 32; c = 4; k = 1; nlist = 1
     d = features_train.shape[1]
     quantizer = faiss.IndexFlatL2(d)  
     index = faiss.IndexIVFPQ(quantizer, d, nlist, m, c)
@@ -192,8 +193,8 @@ def _transformations_nnd_experiment(dataset_load_fn, dataset_name, single_class_
     end = time.time()
     time2 = end - start
     
-    scores = Dq[:,0])
-    labels = y_test.flatten() <> cls_no
+    scores = Dq[:,0]
+    labels = y_test.flatten() != single_class_ind
 
     res_file_name = '{}_transformations_{}_{}.npz'.format(dataset_name,
                                                  get_class_name_from_index(single_class_ind, dataset_name),
@@ -422,7 +423,7 @@ def _adgan_experiment(dataset_load_fn, dataset_name, single_class_ind, gpu_q):
 
 
 def run_experiments(load_dataset_fn, dataset_name, q, n_classes):
-
+    '''
     # CAE OC-SVM
     processes = [Process(target=_cae_ocsvm_experiment,
                          args=(load_dataset_fn, dataset_name, c, q)) for c in range(n_classes)]
@@ -433,8 +434,8 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes):
     # Raw OC-SVM
     for c in range(n_classes):
         _raw_ocsvm_experiment(load_dataset_fn, dataset_name, c)
-
-    n_runs = 5
+    '''
+    n_runs = 1
 
     # Transformations plus NND
     for _ in range(n_runs):
@@ -450,7 +451,7 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes):
             for p in processes:
                 p.join()
 
-
+    '''            
     # Transformations
     for _ in range(n_runs):
         processes = [Process(target=_transformations_experiment,
@@ -490,7 +491,7 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes):
         p.start()
     for p in processes:
         p.join()
-
+    '''
 
 def create_auc_table(metric='roc_auc'):
     file_path = glob(os.path.join(RESULTS_DIR, '*', '*.npz'))
@@ -534,10 +535,10 @@ if __name__ == '__main__':
         q.put(str(g))
 
     experiments_list = [
-        (load_cifar10, 'cifar10', 10),
-        (load_cifar100, 'cifar100', 20),
-        (load_fashion_mnist, 'fashion-mnist', 10),
-        (load_cats_vs_dogs, 'cats-vs-dogs', 2),
+        (load_cifar10, 'cifar10', 10)#,
+        #(load_cifar100, 'cifar100', 20),
+        #(load_fashion_mnist, 'fashion-mnist', 10),
+        #(load_cats_vs_dogs, 'cats-vs-dogs', 2),
     ]
 
     for data_load_fn, dataset_name, n_classes in experiments_list:
